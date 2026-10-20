@@ -1,0 +1,7 @@
+jdk:
+  - openjdk21
+before_install:
+  - yes | sdkmanager --licenses >/dev/null || true
+  - sdkmanager "ndk;28.2.13676358" "cmake;3.31.6"
+install:
+  - ./gradlew publishToMavenLocal --no-daemon -PnativeJobs=2

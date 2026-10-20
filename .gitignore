@@ -1,0 +1,11 @@
+.gradle/
+build/
+local.properties
+__pycache__/
+*.pyc
+*.aar
+*.so
+*.dylib
+*.onnx
+*.onnx.data
+*.download
