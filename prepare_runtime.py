@@ -14,7 +14,7 @@ import urllib.request
 import zipfile
 
 
-VERSION = "0.17.0-it1"
+VERSION = "0.17.0"
 COMMIT = "1d67be30e5b1ed0c264f6f41c598f85157e8288b"
 ORT_VERSION = "1.31.0"
 GENAI_SHA256 = "b5d54161336ee4fb3050574949b2d6980d32864a0e727601980f3b7d9d232324"
@@ -52,6 +52,48 @@ def verify_alignment(path):
         if entry[0] == 1:
             if entry[-1] < 16384 or entry[2] % 16384 != entry[3] % 16384:
                 raise ValueError(f"Library is not aligned for 16-KB pages: {path}")
+
+
+def guidance_licenses(build, cargo, output):
+    guidance = build / "_deps/llguidance-src"
+    metadata = json.loads(subprocess.check_output([
+        str(cargo), "metadata", "--locked", "--format-version", "1",
+        "--manifest-path", str(guidance / "parser/Cargo.toml"),
+        "--filter-platform", "aarch64-linux-android", "--features", "rayon",
+    ], text=True))
+    packages = {package["id"]: package for package in metadata["packages"]}
+    nodes = {node["id"]: node for node in metadata["resolve"]["nodes"]}
+    pending = [package["id"] for package in metadata["packages"] if package["name"] == "llguidance"]
+    included = set()
+    while pending:
+        identity = pending.pop()
+        if identity in included:
+            continue
+        included.add(identity)
+        pending.extend(dependency["pkg"] for dependency in nodes[identity]["deps"]
+                       if any(kind["kind"] != "dev" for kind in dependency["dep_kinds"]))
+    notices = []
+    index = []
+    for package in sorted((packages[identity] for identity in included), key=lambda item: item["name"]):
+        root = Path(package["manifest_path"]).parent
+        files = {path for pattern in ("LICENSE*", "COPYING*", "NOTICE*")
+                 for path in root.glob(pattern) if path.is_file()}
+        if package.get("license_file"):
+            files.add(root / package["license_file"])
+        if not files:
+            raise ValueError("Missing license text for Rust crate " + package["name"])
+        title = package["name"] + " " + package["version"]
+        notices.append(title + "\n" + str(package.get("license")) + "\n" + str(package.get("repository")) + "\n")
+        target = output / "rust" / (package["name"] + "-" + package["version"])
+        target.mkdir(parents=True, exist_ok=True)
+        for path in sorted(files):
+            shutil.copy2(path, target / path.name)
+            notices.append(path.name + "\n" + path.read_text(errors="replace") + "\n")
+        index.append({key: package.get(key) for key in ("name", "version", "license", "repository")})
+    (output / "rust-crates.json").write_text(json.dumps(index, indent=2) + "\n")
+    text = "\n".join(notices)
+    (output / "RUST-LICENSES.txt").write_text(text)
+    return text
 
 
 def main():
@@ -100,6 +142,21 @@ def main():
     if patched_api != original_api:
         api_header.write_text(patched_api)
 
+    dependencies = source / "cmake/external/onnxruntime_external_deps.cmake"
+    original_dependencies = dependencies.read_text()
+    patched_dependencies = original_dependencies.replace(
+        "  corrosion_import_crate(\n    MANIFEST_PATH ${llguidance_SOURCE_DIR}/parser/Cargo.toml\n    FEATURES rayon\n  )",
+        '  configure_file("${GENAI_GUIDANCE_LOCKFILE}" "${llguidance_SOURCE_DIR}/Cargo.lock" COPYONLY)\n'
+        "  corrosion_import_crate(\n    MANIFEST_PATH ${llguidance_SOURCE_DIR}/parser/Cargo.toml\n    FEATURES rayon\n    LOCKED\n  )",
+    )
+    if original_dependencies != patched_dependencies:
+        dependencies.write_text(patched_dependencies)
+    rust_version = subprocess.check_output(["rustc", "--version"], text=True).strip()
+    if not rust_version.startswith("rustc 1.94.1 "):
+        raise ValueError("This build requires Rust 1.94.1")
+    rustc = Path(subprocess.check_output(["rustup", "which", "rustc"], text=True).strip())
+    cargo = rustc.parent / "cargo"
+
     ort_archive = work / f"onnxruntime-android-{ORT_VERSION}.aar"
     fetch(
         "https://repo.maven.apache.org/maven2/com/microsoft/onnxruntime/"
@@ -130,6 +187,20 @@ def main():
 
   /** Closes the Generator and releases any associated resources. */""")
         generator_java.write_text(java)
+    params_java = source / "src/java/src/main/java/ai/onnxruntime/genai/GeneratorParams.java"
+    java = params_java.read_text()
+    if "public void setGuidance(" not in java:
+        java = java.replace("  @Override\n  public void close()", """  /** Constrain output using json_schema, regex, or lark_grammar. */
+  public void setGuidance(String type, String data, boolean enableFastForwardTokens) throws GenAIException {
+    if (nativeHandle == 0) throw new IllegalStateException("GeneratorParams is closed");
+    setGuidanceNative(nativeHandle, type, data, enableFastForwardTokens);
+  }
+
+  private native void setGuidanceNative(long handle, String type, String data, boolean enableFastForwardTokens) throws GenAIException;
+
+  @Override
+  public void close()""")
+        params_java.write_text(java)
     java_sources = sorted((source / "src/java/src/main/java").rglob("*.java"))
     run(javac, "--release", "8", "-h", headers, "-d", classes, *java_sources)
     classes_jar = work / "classes.jar"
@@ -164,7 +235,9 @@ target_link_libraries(onnxruntime-genai-jni PRIVATE onnxruntime-genai)
         run(args.cmake, "-S", source, "-B", build, "-G", "Ninja", *common,
             f"-DORT_HOME={ort}", "-DENABLE_TELEMETRY=OFF", "-DENABLE_PYTHON=OFF",
             "-DENABLE_JAVA=OFF", "-DENABLE_TESTS=OFF", "-DUSE_CUDA=OFF",
-            "-DENABLE_MODEL_BENCHMARK=OFF", "-DUSE_GUIDANCE=OFF")
+            "-DENABLE_MODEL_BENCHMARK=OFF", "-DUSE_GUIDANCE=ON",
+            f"-DRust_COMPILER={rustc}", f"-DRust_CARGO={cargo}",
+            f"-DGENAI_GUIDANCE_LOCKFILE={Path(__file__).resolve().parent / 'guidance-Cargo.lock'}")
         run(args.cmake, "--build", build, "--target", "onnxruntime-genai", "-j", args.jobs)
         library = next(build.rglob("libonnxruntime-genai.so"))
         bridge_build = work / f"jni-{abi}"
@@ -180,18 +253,28 @@ target_link_libraries(onnxruntime-genai-jni PRIVATE onnxruntime-genai)
     artifact = args.output.resolve()
     artifact.mkdir(parents=True, exist_ok=True)
     name = "onnxruntime-genai"
+    notices = guidance_licenses(work / "build-arm64-v8a", cargo, artifact / "licenses")
     with zipfile.ZipFile(artifact / f"{name}.aar", "w", zipfile.ZIP_DEFLATED) as package:
         package.write(classes_jar, "classes.jar")
         package.writestr("AndroidManifest.xml", '<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="ai.onnxruntime.genai"><uses-sdk android:minSdkVersion="24" /></manifest>\n')
         package.writestr("proguard.txt", "-keep class ai.onnxruntime.genai.** { *; }\n")
         package.write(source / "LICENSE", "META-INF/LICENSE-GenAI")
         package.write(source / "ThirdPartyNotices.txt", "META-INF/NOTICE-GenAI")
+        package.write(source / "LICENSE", "assets/onnxruntime-genai/LICENSE-GenAI")
+        package.write(source / "ThirdPartyNotices.txt", "assets/onnxruntime-genai/NOTICE-GenAI")
+        package.write(Path(__file__).resolve().parent / "LICENSE", "assets/onnxruntime-genai/LICENSE-Integration")
+        package.writestr("assets/onnxruntime-genai/RUST-LICENSES.txt", notices)
+        package.write(artifact / "licenses/rust-crates.json", "META-INF/rust-crates.json")
+        package.write(artifact / "licenses/rust-crates.json", "assets/onnxruntime-genai/rust-crates.json")
         for path in sorted(jni.rglob("*.so")):
             package.write(path, Path("jni") / path.relative_to(jni))
     checksums = {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in artifact.iterdir() if p.suffix == ".aar"}
     (artifact / "build.json").write_text(json.dumps({
         "version": VERSION, "genaiCommit": COMMIT, "onnxruntime": ORT_VERSION,
-        "abis": ABIS, "minSdk": 24, "telemetry": False, "pageSize": 16384,
+        "abis": ABIS, "minSdk": 24, "telemetry": False, "pageSize": 16384, "guidance": True, "rust": "1.94.1",
+        "llguidanceCommit": "94fa39128ef184ffeda33845f6d333f332a34b4d",
+        "corrosionCommit": "b1fab721655c5c4b1b08a083d3cd29f163af75d0",
+        "cargoLockSha256": hashlib.sha256((Path(__file__).resolve().parent / "guidance-Cargo.lock").read_bytes()).hexdigest(),
         "ndk": (args.ndk / "source.properties").read_text(), "sha256": checksums,
     }, indent=2) + "\n")
     print(artifact)

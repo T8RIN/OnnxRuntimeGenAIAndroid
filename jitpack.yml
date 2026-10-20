@@ -3,5 +3,8 @@ jdk:
 before_install:
   - yes | sdkmanager --licenses >/dev/null || true
   - sdkmanager "ndk;28.2.13676358" "cmake;3.31.6"
+  - if ! command -v rustup >/dev/null; then curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain 1.94.1; fi
+  - $HOME/.cargo/bin/rustup toolchain install 1.94.1 --profile minimal
+  - $HOME/.cargo/bin/rustup target add --toolchain 1.94.1 aarch64-linux-android x86_64-linux-android
 install:
-  - ./gradlew publishToMavenLocal --no-daemon -PnativeJobs=2
+  - env PATH="$HOME/.cargo/bin:$PATH" ./gradlew publishToMavenLocal --no-daemon -PnativeJobs=2

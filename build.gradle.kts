@@ -4,7 +4,7 @@ plugins {
 }
 
 group = "com.github.T8RIN"
-version = providers.environmentVariable("VERSION").getOrElse("0.17.0-it1")
+version = providers.environmentVariable("VERSION").getOrElse("0.17.0")
 
 val sdkPath = providers.gradleProperty("androidSdkPath")
     .orElse(providers.environmentVariable("ANDROID_HOME"))
@@ -19,7 +19,7 @@ val outputDirectory = layout.buildDirectory.dir("outputs/aar")
 val runtimeAar = outputDirectory.map { it.file("onnxruntime-genai.aar") }
 
 val prepareRuntime by tasks.registering(Exec::class) {
-    inputs.files("prepare_runtime.py", "runtime_options.cpp")
+    inputs.files("prepare_runtime.py", "runtime_options.cpp", "rust-toolchain.toml", "guidance-Cargo.lock", "LICENSE")
     outputs.dir(outputDirectory)
     doFirst {
         check(ndkPath.isPresent && cmakePath.isPresent) {
@@ -38,7 +38,8 @@ val sourcesJar by tasks.registering(Jar::class) {
     dependsOn(prepareRuntime)
     archiveClassifier.set("sources")
     from("$runtimeWork/source/src/java/src/main/java")
-    from("runtime_options.cpp", "prepare_runtime.py", "UPSTREAM-LICENSE", "UPSTREAM-NOTICES")
+    from("runtime_options.cpp", "prepare_runtime.py", "rust-toolchain.toml", "guidance-Cargo.lock", "LICENSE", "UPSTREAM-LICENSE", "UPSTREAM-NOTICES")
+    from(outputDirectory.map { it.dir("licenses") }) { into("licenses") }
 }
 
 tasks.assemble {
@@ -56,7 +57,7 @@ publishing {
             artifact(sourcesJar)
             pom {
                 name.set("ONNX Runtime GenAI Android")
-                description.set("GenAI 0.17.0 for Android, without telemetry, with native cancellation and 16-KB page support")
+                description.set("GenAI 0.17.0 for Android, without telemetry, with constrained generation, native cancellation and 16-KB page support")
                 url.set("https://github.com/T8RIN/OnnxRuntimeGenAIAndroid")
                 licenses {
                     license {
